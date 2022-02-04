@@ -739,9 +739,15 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player {
         serversToTry = connOrder;
       }
     }
+  
+    String id = profile.getUndashedId();
+    String tail = id.length() > 15 ? id.substring(id.length() - 15) : id;
+    long salt = Long.parseLong(tail, 16);
 
     for (int i = tryIndex; i < serversToTry.size(); i++) {
-      String toTryName = serversToTry.get(i);
+      int rand = (int) ((salt + i) % serversToTry.size());
+      System.out.println("rand: " + rand + " size: " + serversToTry.size() + " i: " + i + " salt: " + salt);
+      String toTryName = serversToTry.get(rand);
       if ((connectedServer != null && hasSameName(connectedServer.getServer(), toTryName))
           || (connectionInFlight != null && hasSameName(connectionInFlight.getServer(), toTryName))
           || (current != null && hasSameName(current, toTryName))) {
