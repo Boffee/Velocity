@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Velocity Contributors
+ * Copyright (C) 2018-2023 Velocity Contributors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,6 +27,7 @@ import com.velocitypowered.api.event.command.PlayerAvailableCommandsEvent;
 import com.velocitypowered.api.event.connection.PluginMessageEvent;
 import com.velocitypowered.api.event.player.PlayerResourcePackStatusEvent;
 import com.velocitypowered.api.event.player.ServerResourcePackSendEvent;
+import com.velocitypowered.api.event.proxy.ProxyPingEvent;
 import com.velocitypowered.api.network.ProtocolVersion;
 import com.velocitypowered.api.proxy.messages.ChannelIdentifier;
 import com.velocitypowered.api.proxy.player.ResourcePackInfo;
@@ -42,22 +43,27 @@ import com.velocitypowered.proxy.protocol.packet.AvailableCommands;
 import com.velocitypowered.proxy.protocol.packet.BossBar;
 import com.velocitypowered.proxy.protocol.packet.Disconnect;
 import com.velocitypowered.proxy.protocol.packet.KeepAlive;
-import com.velocitypowered.proxy.protocol.packet.PlayerListItem;
+import com.velocitypowered.proxy.protocol.packet.LegacyPlayerListItem;
 import com.velocitypowered.proxy.protocol.packet.PluginMessage;
+import com.velocitypowered.proxy.protocol.packet.RemovePlayerInfo;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackRequest;
 import com.velocitypowered.proxy.protocol.packet.ResourcePackResponse;
+import com.velocitypowered.proxy.protocol.packet.ServerData;
 import com.velocitypowered.proxy.protocol.packet.TabCompleteResponse;
+import com.velocitypowered.proxy.protocol.packet.UpsertPlayerInfo;
 import com.velocitypowered.proxy.protocol.util.PluginMessageUtil;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.handler.timeout.ReadTimeoutException;
-
 import java.util.regex.Pattern;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+/**
+ * Handles a connected player.
+ */
 public class BackendPlaySessionHandler implements MinecraftSessionHandler {
 
   private static final Pattern PLAUSIBLE_SHA1_HASH = Pattern.compile("^[a-z0-9]{40}$");
@@ -139,10 +145,10 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   @Override
   public boolean handle(ResourcePackRequest packet) {
     ResourcePackInfo.Builder builder = new VelocityResourcePackInfo.BuilderImpl(
-            Preconditions.checkNotNull(packet.getUrl()))
-            .setPrompt(packet.getPrompt())
-            .setShouldForce(packet.isRequired())
-            .setOrigin(ResourcePackInfo.Origin.DOWNSTREAM_SERVER);
+        Preconditions.checkNotNull(packet.getUrl()))
+        .setPrompt(packet.getPrompt())
+        .setShouldForce(packet.isRequired())
+        .setOrigin(ResourcePackInfo.Origin.DOWNSTREAM_SERVER);
 
     String hash = packet.getHash();
     if (hash != null && !hash.isEmpty()) {
@@ -152,7 +158,7 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     }
 
     ServerResourcePackSendEvent event = new ServerResourcePackSendEvent(
-            builder.build(), this.serverConn);
+        builder.build(), this.serverConn);
 
     server.getEventManager().fire(event).thenAcceptAsync(serverResourcePackSendEvent -> {
       if (playerConnection.isClosed()) {
@@ -162,7 +168,7 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
         ResourcePackInfo toSend = serverResourcePackSendEvent.getProvidedResourcePack();
         if (toSend != serverResourcePackSendEvent.getReceivedResourcePack()) {
           ((VelocityResourcePackInfo) toSend)
-                  .setOriginalOrigin(ResourcePackInfo.Origin.DOWNSTREAM_SERVER);
+              .setOriginalOrigin(ResourcePackInfo.Origin.DOWNSTREAM_SERVER);
         }
 
         serverConn.getPlayer().queueResourcePack(toSend);
@@ -175,8 +181,8 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     }, playerConnection.eventLoop()).exceptionally((ex) -> {
       if (serverConn.getConnection() != null) {
         serverConn.getConnection().write(new ResourcePackResponse(
-                packet.getHash(),
-                PlayerResourcePackStatusEvent.Status.DECLINED
+            packet.getHash(),
+            PlayerResourcePackStatusEvent.Status.DECLINED
         ));
       }
       logger.error("Exception while handling resource pack send for {}", playerConnection, ex);
@@ -244,8 +250,20 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
   }
 
   @Override
-  public boolean handle(PlayerListItem packet) {
-    serverConn.getPlayer().getTabList().processBackendPacket(packet);
+  public boolean handle(LegacyPlayerListItem packet) {
+    serverConn.getPlayer().getTabList().processLegacy(packet);
+    return false;
+  }
+
+  @Override
+  public boolean handle(UpsertPlayerInfo packet) {
+    serverConn.getPlayer().getTabList().processUpdate(packet);
+    return false;
+  }
+
+  @Override
+  public boolean handle(RemovePlayerInfo packet) {
+    serverConn.getPlayer().getTabList().processRemove(packet);
     return false;
   }
 
@@ -259,12 +277,29 @@ public class BackendPlaySessionHandler implements MinecraftSessionHandler {
     }
 
     server.getEventManager().fire(
-        new PlayerAvailableCommandsEvent(serverConn.getPlayer(), rootNode))
+            new PlayerAvailableCommandsEvent(serverConn.getPlayer(), rootNode))
         .thenAcceptAsync(event -> playerConnection.write(commands), playerConnection.eventLoop())
         .exceptionally((ex) -> {
           logger.error("Exception while handling available commands for {}", playerConnection, ex);
           return null;
         });
+    return true;
+  }
+
+  @Override
+  public boolean handle(ServerData packet) {
+    server.getServerListPingHandler().getInitialPing(this.serverConn.getPlayer())
+        .thenComposeAsync(
+            ping -> server.getEventManager()
+                .fire(new ProxyPingEvent(this.serverConn.getPlayer(), ping)),
+            playerConnection.eventLoop()
+        )
+        .thenAcceptAsync(pingEvent ->
+            this.playerConnection.write(
+                new ServerData(pingEvent.getPing().getDescriptionComponent(),
+                    pingEvent.getPing().getFavicon().orElse(null),
+                    packet.isSecureChatEnforced())
+            ), playerConnection.eventLoop());
     return true;
   }
 
